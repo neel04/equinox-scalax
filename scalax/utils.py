@@ -1,13 +1,44 @@
 from functools import partial
+from typing import Any
 
 import jax
+import equinox as eqx
 import jax.numpy as jnp
+
+from jaxtyping import PyTreeDef
+
+
+class Static(eqx.Module):
+    """Wraps a value into a `eqx.field(static=True)`.
+
+    This is useful to treat something as just static metadata with respect to a JAX
+    transformation; for example this is used to return non-arrays from a filtered
+    transform.
+    """
+
+    _leaves: list[Any] = eqx.field(static=True)
+    _treedef: PyTreeDef = eqx.field(static=True)  # pyright: ignore
+
+    def __init__(self, value: Any):
+        # By flattening, we handle pytrees without `__eq__` methods.
+        # When comparing static metadata for equality, this means we never actually
+        # call `value.__eq__`.
+        self._leaves, self._treedef = jax.tree_util.tree_flatten(value)
+
+    @property
+    def value(self):
+        return jax.tree_util.tree_unflatten(self._treedef, self._leaves)
+
+
+def _filter(x):
+    return isinstance(x, jax.ShapeDtypeStruct) or eqx.is_array(x)
 
 
 class JaxRNG(object):
-    """ A convenient stateful Jax RNG wrapper. Can be used to wrap RNG inside
-        pure function.
+    """A convenient stateful Jax RNG wrapper. Can be used to wrap RNG inside
+    pure function.
     """
+
     global_rng_generator = None
 
     @classmethod
@@ -36,38 +67,36 @@ class JaxRNG(object):
 
     @classmethod
     def next_rng(cls, *args, **kwargs):
-        assert cls.global_rng_generator is not None, 'Global RNG not initialized.'
+        assert cls.global_rng_generator is not None, "Global RNG not initialized."
         return cls.global_rng_generator(*args, **kwargs)
 
 
 def get_float_dtype_by_name(dtype):
     return {
-        'bf16': jnp.bfloat16,
-        'bfloat16': jnp.bfloat16,
-        'fp16': jnp.float16,
-        'float16': jnp.float16,
-        'fp32': jnp.float32,
-        'float32': jnp.float32,
-        'fp64': jnp.float64,
-        'float64': jnp.float64,
+        "bf16": jnp.bfloat16,
+        "bfloat16": jnp.bfloat16,
+        "fp16": jnp.float16,
+        "float16": jnp.float16,
+        "fp32": jnp.float32,
+        "float32": jnp.float32,
+        "fp64": jnp.float64,
+        "float64": jnp.float64,
     }[dtype]
 
 
 def float_tensor_to_dtype(tensor, dtype):
-    if dtype is None or dtype == '':
+    if dtype is None or dtype == "":
         return tensor
     if isinstance(dtype, str):
         dtype = get_float_dtype_by_name(dtype)
     float_dtypes = (jnp.bfloat16, jnp.float16, jnp.float32, jnp.float64)
-    if getattr(tensor, 'dtype', None) in float_dtypes:
+    if getattr(tensor, "dtype", None) in float_dtypes:
         tensor = tensor.astype(dtype)
     return tensor
 
 
 def float_to_dtype(tree, dtype):
-    return jax.tree_util.tree_map(
-        partial(float_tensor_to_dtype, dtype=dtype), tree
-    )
+    return jax.tree_util.tree_map(partial(float_tensor_to_dtype, dtype=dtype), tree)
 
 
 def tree_path_to_string(path, sep=None):
@@ -97,19 +126,21 @@ def flatten_tree(xs, is_leaf=None, sep=None):
 
 
 def named_tree_map(f, tree, *rest, is_leaf=None, sep=None):
-    """ An extended version of jax.tree_util.tree_map, where the mapped function
-        f takes both the name (path) and the tree leaf as input.
+    """An extended version of jax.tree_util.tree_map, where the mapped function
+    f takes both the name (path) and the tree leaf as input.
     """
     return jax.tree_util.tree_map_with_path(
         lambda path, x, *r: f(tree_path_to_string(path, sep=sep), x, *r),
-        tree, *rest,
-        is_leaf=is_leaf
+        tree,
+        *rest,
+        is_leaf=is_leaf,
     )
 
 
-def print_pytree_structure(tree, sep='/', is_leaf=None):
+def print_pytree_structure(tree, sep="/", is_leaf=None):
     def print_fn(path, val):
         shape = f'shape: {val.shape if hasattr(val, "shape") else "none"}'
         dtype = f'dtype: {val.dtype if hasattr(val, "dtype") else "none"}'
-        print(f'{path}: {shape}, {dtype}')
+        print(f"{path}: {shape}, {dtype}")
+
     named_tree_map(print_fn, tree, is_leaf=is_leaf, sep=sep)

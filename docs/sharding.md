@@ -24,7 +24,7 @@ compiler.
   devices are arranged in a physical mesh with certain dimensions. This parameter
   controls whether  splitting a phyisical mesh dimension into multiple logical
   mesh dimensions is allowed. For example, on TPU pod with physical topology
-  4x4x4, it would be impossible to constract 8x8 logical mesh without splitting
+  4x4x4, it would be impossible to construct 8x8 logical mesh without splitting
   the physical mesh dimensions. However, please note that splitting a physical
   mesh dimension may lead to degraded communication bandwidth between devices.
 

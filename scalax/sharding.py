@@ -1,21 +1,22 @@
-from functools import partial
-import re
 import abc
+import re
 from dataclasses import dataclass
-from typing import Optional, Mapping, Union, ClassVar, List, Callable
-import numpy as np
+from functools import partial
+from typing import Any, Callable, ClassVar, List, Mapping, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec
-from jax.sharding import Mesh, NamedSharding
+import numpy as np
+from equinox import combine, partition
 from jax.experimental import mesh_utils
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jaxtyping import PyTree
 
-from scalax.utils import named_tree_map
+from scalax.utils import Static, _filter, named_tree_map
 
 
 class ShardingRule(abc.ABC):
-    """ Base class for sharding rules. """
+    """Base class for sharding rules."""
 
     @abc.abstractmethod
     def apply(self, pytree):
@@ -23,10 +24,12 @@ class ShardingRule(abc.ABC):
 
 
 class FSDPShardingRule(ShardingRule):
-    """ Create FSDP sharding PartitionSpec for a pytree. """
+    """Create FSDP sharding PartitionSpec for a pytree."""
 
-    def __init__(self, fsdp_axis_name='fsdp', fsdp_axis_size=None, min_fsdp_size=1048576):
-        """ Create an FSDPShardingRule.
+    def __init__(
+        self, fsdp_axis_name="fsdp", fsdp_axis_size=None, min_fsdp_size=1048576
+    ):
+        """Create an FSDPShardingRule.
 
         Args:
             fsdp_axis_name: The name of the FSDP axis.
@@ -45,7 +48,7 @@ class FSDPShardingRule(ShardingRule):
         while n % 2 == 0:
             n //= 2
             k += 1
-        return 2 ** k
+        return 2**k
 
     def apply(self, pytree):
         def get_partition_spec(tensor):
@@ -55,8 +58,7 @@ class FSDPShardingRule(ShardingRule):
                 if self.fsdp_axis_size is None:
                     # Guess the FSDP axis size is a power of two
                     allowed_sizes = [
-                        -self.largest_power_of_two_divisor(n)
-                        for n in tensor.shape
+                        -self.largest_power_of_two_divisor(n) for n in tensor.shape
                     ]
                     for i in np.argsort(allowed_sizes):
                         if tensor.shape[i] > 1:
@@ -73,10 +75,10 @@ class FSDPShardingRule(ShardingRule):
 
 
 class TreePathShardingRule(ShardingRule):
-    """ Create PartitionSpec for a pytree according to a list of regex rules. """
+    """Create PartitionSpec for a pytree according to a list of regex rules."""
 
     def __init__(self, *rules, strict=True):
-        """ Create a TreePathShardingRule according to a list of regex rules.
+        """Create a TreePathShardingRule according to a list of regex rules.
 
         Args:
             rules: A list of pairs of regex rules and PartitionSpecs. The regex
@@ -91,7 +93,8 @@ class TreePathShardingRule(ShardingRule):
         self.strict = strict
 
     def apply(self, pytree):
-        """ Returns a pytree of PartitionSpec according to rules. """
+        """Returns a pytree of PartitionSpec according to rules."""
+
         def get_partition_spec(name, leaf):
             if len(leaf.shape) == 0 or np.prod(leaf.shape) == 1:
                 """ Don't partition scalar values. """
@@ -100,16 +103,17 @@ class TreePathShardingRule(ShardingRule):
                 if re.search(rule, name) is not None:
                     return ps
             if self.strict:
-                raise ValueError(f'Partition rule not found for param: {name}')
+                raise ValueError(f"Partition rule not found for param: {name}")
             return PartitionSpec()
-        return named_tree_map(get_partition_spec, pytree, sep='/')
+
+        return named_tree_map(get_partition_spec, pytree, sep="/")
 
 
 class PolicyShardingRule(ShardingRule):
-    """ Create PartitionSpec for a pytree with a callable policy. """
+    """Create PartitionSpec for a pytree with a callable policy."""
 
     def __init__(self, policy):
-        """ Create a PolicyShardingRule with a callable policy.
+        """Create a PolicyShardingRule with a callable policy.
 
         Args:
             policy: A callable that takes a tree path and a leaf tensor as input
@@ -118,17 +122,19 @@ class PolicyShardingRule(ShardingRule):
         self.policy = policy
 
     def apply(self, pytree):
-        """ Returns a pytree of PartitionSpec according to the policy. """
+        """Returns a pytree of PartitionSpec according to the policy."""
+
         def get_partition_spec(name, leaf):
             return self.policy(name, leaf)
-        return named_tree_map(get_partition_spec, pytree, sep='/')
+
+        return named_tree_map(get_partition_spec, pytree, sep="/")
 
 
 class MeshShardingHelper(object):
-    """ Helper class for creating jit sharding jax functions with sharding rules. """
+    """Helper class for creating jit sharding jax functions with sharding rules."""
 
     def __init__(self, axis_dims, axis_names, mesh_axis_splitting=False):
-        """ Create a MeshShardingHelper.
+        """Create a MeshShardingHelper.
 
         Args:
             axis_dims: A tuple of integers, the shape of the mesh.
@@ -150,16 +156,13 @@ class MeshShardingHelper(object):
         return self._mesh
 
     def get_context(self, **kwargs):
-        """ Get a context manager for the current MeshShardingHelper."""
-        return MeshShardingContext(
-            mesh_helper=self,
-            **kwargs
-        )
+        """Get a context manager for the current MeshShardingHelper."""
+        return MeshShardingContext(mesh_helper=self, **kwargs)
 
     @classmethod
     def get_global_mesh(cls):
-        """ Get the current global MeshShardingHelper. The global MeshShardingHelper
-            is set by the context manager returned by get_context.
+        """Get the current global MeshShardingHelper. The global MeshShardingHelper
+        is set by the context manager returned by get_context.
         """
         context = MeshShardingContext.get_global_context()
         if context is None:
@@ -168,8 +171,8 @@ class MeshShardingHelper(object):
 
     @classmethod
     def get_global_annotation_shardings(cls):
-        """ Get the current global annotation shardings via the global MeshShardingHelper
-            context.
+        """Get the current global annotation shardings via the global MeshShardingHelper
+        context.
         """
         context = MeshShardingContext.get_global_context()
         if context is None:
@@ -180,7 +183,9 @@ class MeshShardingHelper(object):
         if static_argnums is None:
             return None, args
         static_args = tuple(args[i] for i in static_argnums)
-        dynamic_args = tuple(args[i] for i in range(len(args)) if i not in static_argnums)
+        dynamic_args = tuple(
+            args[i] for i in range(len(args)) if i not in static_argnums
+        )
         return static_args, dynamic_args
 
     def _combine_static_dynamic_args(self, static_argnums, static_args, dynamic_args):
@@ -192,7 +197,7 @@ class MeshShardingHelper(object):
         return tuple(args)
 
     def match_sharding_rule(self, sharding_rules, pytree):
-        """ Apply sharding rules to a pytree to get a pytree of PartitionSpecs.
+        """Apply sharding rules to a pytree to get a pytree of PartitionSpecs.
 
         Args:
             sharding_rules: The sharding rules or partition specs for the pytree.
@@ -201,39 +206,38 @@ class MeshShardingHelper(object):
         Returns:
             A pytree of PartitionSpecs with the same structure as the input pytree.
         """
+
         def get_partition_spec(rule, pytree):
             if isinstance(rule, ShardingRule):
                 return jax.tree_util.tree_map(
-                    lambda x: NamedSharding(self.mesh, x),
-                    rule.apply(pytree)
+                    lambda x: NamedSharding(self.mesh, x), rule.apply(pytree)
                 )
             else:
                 return jax.tree_util.tree_map(
-                    lambda x: NamedSharding(self.mesh, rule),
-                    pytree
+                    lambda _: NamedSharding(self.mesh, rule), pytree
                 )
 
         def is_leaf(x):
             # Check if the node is None, a PartitionSpec or a ShardingRule
             return (
-                x is None
-                or isinstance(x, ShardingRule)
-                or isinstance(x, PartitionSpec)
+                x is None or isinstance(x, ShardingRule) or isinstance(x, PartitionSpec)
             )
 
         return jax.tree_util.tree_map(
             get_partition_spec, sharding_rules, pytree, is_leaf=is_leaf
         )
 
-    def sjit(self,
-             fun,
-             in_shardings=None,
-             out_shardings=None,
-             static_argnums=None,
-             args_sharding_constraint=None,
-             annotation_shardings=None,
-             **kwargs):
-        """ JIT compile a function with sharding rules.
+    def sjit(
+        self,
+        fun,
+        in_shardings=None,
+        out_shardings=None,
+        static_argnums=None,
+        args_sharding_constraint=None,
+        annotation_shardings=None,
+        **kwargs,
+    ):
+        """JIT compile a function with sharding rules.
 
         Args:
             fun: The function to be JIT compiled.
@@ -257,14 +261,26 @@ class MeshShardingHelper(object):
                     _args_sharding_constraint = tuple(args_sharding_constraint)
                 else:
                     _args_sharding_constraint = args_sharding_constraint
-                static_args, dynamic_args = self._split_static_dynamic_args(static_argnums, args)
-                named_shardings = self.match_sharding_rule(_args_sharding_constraint, dynamic_args)
-                dynamic_args = jax.lax.with_sharding_constraint(dynamic_args, named_shardings)
-                args = self._combine_static_dynamic_args(static_argnums, static_args, dynamic_args)
+                static_args, dynamic_args = self._split_static_dynamic_args(
+                    static_argnums, args
+                )
+                named_shardings = self.match_sharding_rule(
+                    _args_sharding_constraint, dynamic_args
+                )
+                dynamic_args = jax.lax.with_sharding_constraint(
+                    dynamic_args, named_shardings
+                )
+                args = self._combine_static_dynamic_args(
+                    static_argnums, static_args, dynamic_args
+                )
             return fun(*args)
 
         def jit_fn_by_static_args(*args):
-            static_args = tuple(args[i] for i in static_argnums) if static_argnums is not None else ()
+            static_args = (
+                tuple(args[i] for i in static_argnums)
+                if static_argnums is not None
+                else ()
+            )
             if static_args in static_args_jitted_fn_cache:
                 return static_args_jitted_fn_cache[static_args]
 
@@ -276,7 +292,9 @@ class MeshShardingHelper(object):
                 else:
                     _in_shardings = in_shardings
                 _, dynamic_args = self._split_static_dynamic_args(static_argnums, args)
-                matched_in_shardings = self.match_sharding_rule(_in_shardings, dynamic_args)
+                matched_in_shardings = self.match_sharding_rule(
+                    _in_shardings, dynamic_args
+                )
 
             if out_shardings is None:
                 matched_out_shardings = None
@@ -289,7 +307,7 @@ class MeshShardingHelper(object):
                 in_shardings=matched_in_shardings,
                 out_shardings=matched_out_shardings,
                 static_argnums=static_argnums,
-                **kwargs
+                **kwargs,
             )
 
             static_args_jitted_fn_cache[static_args] = jitted_fn
@@ -312,9 +330,56 @@ class MeshShardingHelper(object):
             jit_fn_by_static_args_fn=jit_fn_by_static_args,
         )
 
+    def filter_sjit(
+        self,
+        tgt_fun: Callable,
+        in_shardings: Optional[Union[Tuple, List]] = None,
+        out_shardings: Optional[Union[Tuple, List]] = None,
+        args_sharding_constraint: Optional[Union[Tuple, List]] = None,
+        annotation_shardings: Optional[Union[Tuple, List]] = None,
+    ):
+        def filter_fn(fun: Callable[..., Any], *args) -> Callable:
+            """Constructs a filtered version of whatever function is passed to it."""
+
+            jit_fn: Callable = partial(
+                self.sjit,
+                in_shardings=in_shardings,
+                out_shardings=out_shardings,
+                args_sharding_constraint=args_sharding_constraint,
+                annotation_shardings=annotation_shardings,
+                static_argnums=(1, 3),
+            )
+
+            dyn_fun, stat_fun = partition(fun, _filter)
+
+            @jit_fn
+            def wrapped(
+                _dynamic: PyTree,
+                _static: PyTree,
+                _dyn_fun: Callable,
+                _stat_fun: Callable,
+            ) -> Tuple[PyTree, Static]:
+                # Reconstruct the input and the function
+                recon = combine(_dynamic, _static)
+                fun = combine(_dyn_fun, _stat_fun)
+
+                _out = fun(recon)
+
+                _dynamic_out, _static_out = partition(_out, _filter)
+
+                return _dynamic_out, Static(_static_out)
+
+            dynamic, static = partition(args, _filter)
+
+            dyn_out, stat_out = wrapped(dynamic, static, dyn_fun, stat_fun)
+
+            return combine(dyn_out, stat_out.value)
+
+        return partial(filter_fn, tgt_fun)
+
     @classmethod
     def with_sharding_constraint(cls, pytree, sharding_rule):
-        """ Apply sharding constraint to a pytree via the global mesh. The
+        """Apply sharding constraint to a pytree via the global mesh. The
             global mesh is implicitly set by the sjit call.
 
         Args:
@@ -333,7 +398,7 @@ class MeshShardingHelper(object):
 
     @classmethod
     def with_sharding_annotation(cls, pytree, sharding_name):
-        """ Apply sharding annotation to a pytree via the global annotation shardings.
+        """Apply sharding annotation to a pytree via the global annotation shardings.
             The global annotation shardings is implicitly set by the sjit call.
 
         Args:
@@ -363,14 +428,15 @@ class MeshShardingHelper(object):
             same structure as the input pytree.
         """
         named_shardings = self.match_sharding_rule(sharding_rule, pytree)
+
         def make_shard_fn(partition_spec):
             jax_shard_function = jax.jit(
-                lambda x: x,
-                in_shardings=None,
-                out_shardings=partition_spec
+                lambda x: x, in_shardings=None, out_shardings=partition_spec
             )
+
             def shard_fn(tensor):
                 return jax_shard_function(tensor).block_until_ready()
+
             return shard_fn
 
         def make_gather_fn(partition_spec):
@@ -379,8 +445,10 @@ class MeshShardingHelper(object):
                 in_shardings=partition_spec,
                 out_shardings=NamedSharding(self.mesh, PartitionSpec()),
             )
+
             def gather_fn(tensor):
                 return jax.device_get(jax_gather_fn(tensor))
+
             return gather_fn
 
         shard_fns = jax.tree_util.tree_map(make_shard_fn, named_shardings)
@@ -389,7 +457,7 @@ class MeshShardingHelper(object):
 
     @classmethod
     def apply_shard_and_gather_fns(cls, fns, pytree):
-        """ Apply pytree of sharding and gathering functions to a pytree.
+        """Apply pytree of sharding and gathering functions to a pytree.
 
         Args:
             fns: The pytree of sharding or gathering functions.
@@ -401,7 +469,7 @@ class MeshShardingHelper(object):
         return jax.tree_util.tree_map(lambda fn, x: fn(x), fns, pytree)
 
     def local_data_to_global_array(self, pytree, batch_axis=0, mesh_axis_subset=None):
-        """ Convert local data to a global array with sharding.
+        """Convert local data to a global array with sharding.
 
         Args:
             pytree: The local data pytree.
@@ -417,16 +485,18 @@ class MeshShardingHelper(object):
             if isinstance(mesh_axis_subset, str):
                 mesh_axis_subset = (mesh_axis_subset,)
             for name in mesh_axis_subset:
-                assert name in self.axis_names, f'Axis name {name} not found in mesh axis names'
+                assert (
+                    name in self.axis_names
+                ), f"Axis name {name} not found in mesh axis names"
             mesh_axis_subset = tuple(mesh_axis_subset)
 
         in_sharding = NamedSharding(
             self.mesh,
-            PartitionSpec(*[None for _ in range(batch_axis)], self.axis_names)
+            PartitionSpec(*[None for _ in range(batch_axis)], self.axis_names),
         )
         out_sharding = NamedSharding(
             self.mesh,
-            PartitionSpec(*[None for _ in range(batch_axis)], mesh_axis_subset)
+            PartitionSpec(*[None for _ in range(batch_axis)], mesh_axis_subset),
         )
 
         local_devices = jax.local_devices()
@@ -443,9 +513,7 @@ class MeshShardingHelper(object):
             output_shape = list(array.shape)
             output_shape[batch_axis] = output_shape[batch_axis] * process_count
             sharded_array = jax.make_array_from_single_device_arrays(
-                shape=output_shape,
-                sharding=in_sharding,
-                arrays=local_arrays
+                shape=output_shape, sharding=in_sharding, arrays=local_arrays
             )
             return jax.device_put(sharded_array, out_sharding)
 
@@ -454,7 +522,8 @@ class MeshShardingHelper(object):
 
 @dataclass
 class SJITCompiledFunction(object):
-    """ SJIT compiled function with extra attribute for easy access. """
+    """SJIT compiled function with extra attribute for easy access."""
+
     mesh: MeshShardingHelper
     call_fn: Callable
     lower_fn: Callable
@@ -472,9 +541,12 @@ class SJITCompiledFunction(object):
 
 @dataclass
 class MeshShardingContext(object):
-    """ Context and context manager for MeshShardingHelper. """
+    """Context and context manager for MeshShardingHelper."""
+
     mesh_helper: MeshShardingHelper
-    annotation_shardings: Optional[Mapping[str, Union[ShardingRule, PartitionSpec]]] = None
+    annotation_shardings: Optional[Mapping[str, Union[ShardingRule, PartitionSpec]]] = (
+        None
+    )
     global_contexts: ClassVar[List] = []
 
     def __enter__(self):
@@ -491,22 +563,21 @@ class MeshShardingContext(object):
         return cls.global_contexts[-1]
 
 
-
 def get_global_mesh():
-    """ Alias for MeshShardingHelper.get_global_mesh """
+    """Alias for MeshShardingHelper.get_global_mesh"""
     return MeshShardingHelper.get_global_mesh()
 
 
 def get_global_annotation_shardings():
-    """ Alias for MeshShardingHelper.get_global_annotation_shardings """
+    """Alias for MeshShardingHelper.get_global_annotation_shardings"""
     return MeshShardingHelper.get_global_annotation_shardings()
 
 
 def with_sharding_constraint(*args, **kwargs):
-    """ Alias for MeshShardingHelper.with_sharding_constraint """
+    """Alias for MeshShardingHelper.with_sharding_constraint"""
     return MeshShardingHelper.with_sharding_constraint(*args, **kwargs)
 
 
 def with_sharding_annotation(*args, **kwargs):
-    """ Alias for MeshShardingHelper.with_sharding_constraint """
+    """Alias for MeshShardingHelper.with_sharding_constraint"""
     return MeshShardingHelper.with_sharding_annotation(*args, **kwargs)
